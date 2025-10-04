@@ -190,8 +190,8 @@ if "cover_path" not in st.session_state:
     st.session_state.cover_path = None
 
 
-st.set_page_config(page_title="Discogs → Reels", page_icon="🎵", layout="wide")
-st.title("Discogs → Reels (preview y generación)")
+st.set_page_config(page_title="Discogs → Videos", page_icon="🎞️", layout="wide")
+st.title("Discogs → Videos (generación)")
 
 # ---------- Paso 0: Elegir carpeta de salida ----------
 st.subheader("1) Elegí la carpeta de salida (persistente)")
@@ -336,12 +336,12 @@ if st.session_state.release_info:
                 query = " ".join([p for p in parts if p]).strip()
 
                 st.caption(f"🔎 Búsqueda (principal): `{query}` (top 5)")
-                results = yt_search(query, n=5)
+                results = yt_search(query, n=3)
 
                 if not results:
                     fallback_query = f"{info.title} {track_title}"
                     st.caption(f"↩️  Sin resultados; fallback: `{fallback_query}`")
-                    results = yt_search(fallback_query, n=5)
+                    results = yt_search(fallback_query, n=3)
 
                 st.session_state.search_results[idx] = results
 
@@ -474,210 +474,3 @@ if st.session_state.release_info:
             st.success("✅ Listo. Mirá la carpeta de salida.")
             if logs:
                 st.text_area("Log de proceso", "\n".join(logs), height=200)
-
-
-
-# ============================
-# SECCIÓN: Publicar en Instagram (carruseles)
-# Pegar desde aquí hacia abajo, al final de tu streamlit_app.py
-# ============================
-import mimetypes, datetime, time
-from dotenv import load_dotenv
-from google.cloud import storage
-from google.oauth2 import service_account
-
-load_dotenv()
-
-# --- Config IG/GCS desde .env (sin espacios) ---
-IG_USER_ID = (os.getenv("IG_USER_ID") or "").strip()
-IG_TOKEN   = (os.getenv("IG_ACCESS_TOKEN") or "").strip()
-GCS_JSON   = (os.getenv("GCS_CREDENTIALS_JSON") or "").strip()
-GCS_BUCKET = (os.getenv("GCS_BUCKET") or "").strip()
-GCS_PREFIX = (os.getenv("GCS_PREFIX") or "discogs-posts").strip().strip("/")
-GRAPH      = "https://graph.facebook.com/v20.0"
-
-def _gcs_client():
-    if not GCS_JSON or not Path(GCS_JSON).exists():
-        raise RuntimeError("Falta GCS_CREDENTIALS_JSON o el archivo no existe.")
-    if not GCS_BUCKET:
-        raise RuntimeError("Falta GCS_BUCKET.")
-    creds = service_account.Credentials.from_service_account_file(GCS_JSON)
-    return storage.Client(credentials=creds)
-
-def gcs_upload_signed(local_path: Path, key_prefix: str, expires_seconds: int = 7200) -> str:
-    """
-    Sube a GCS y devuelve Signed URL V4 (funciona con UBLA; no usa ACLs).
-    """
-    client = _gcs_client()
-    bucket = client.bucket(GCS_BUCKET)
-    dest_name = f"{key_prefix}/{local_path.name}" if key_prefix else local_path.name
-    blob = bucket.blob(dest_name)
-    ctype, _ = mimetypes.guess_type(local_path.name)
-    blob.upload_from_filename(str(local_path), content_type=ctype or "video/mp4")
-    url = blob.generate_signed_url(
-        version="v4",
-        expiration=datetime.timedelta(seconds=expires_seconds),
-        method="GET",
-        response_disposition=f'inline; filename="{local_path.name}"',
-    )
-    return url
-
-def ig_create_carousel_child(video_url: str) -> str:
-    """
-    Crea un child de carrusel como VIDEO (obligatorio indicar media_type=VIDEO).
-    """
-    resp = requests.post(
-        f"{GRAPH}/{IG_USER_ID}/media",
-        data={
-            "media_type": "VIDEO",     # <-- clave para que NO pida image_url
-            "video_url": video_url,
-            "is_carousel_item": "true",
-            "access_token": IG_TOKEN,
-        },
-        timeout=180,
-    )
-    if resp.status_code != 200:
-        st.error(f"IG ERROR child: {resp.status_code} {resp.text}")
-        resp.raise_for_status()
-    return resp.json()["id"]
-
-def ig_wait_finished(creation_id: str, timeout_sec: int = 240) -> str:
-    """
-    Poll hasta FINISHED/PUBLISHED (necesario para videos antes de crear el padre).
-    """
-    t0, last = time.time(), None
-    while time.time() - t0 < timeout_sec:
-        r = requests.get(
-            f"{GRAPH}/{creation_id}",
-            params={"fields": "status_code", "access_token": IG_TOKEN},
-            timeout=30,
-        )
-        r.raise_for_status()
-        status = r.json().get("status_code")
-        if status != last:
-            last = status
-        if status in ("FINISHED", "PUBLISHED"):
-            return status
-        time.sleep(3)
-    raise TimeoutError(f"Timeout esperando FINISHED para {creation_id}")
-
-def ig_create_carousel_parent(children_ids: list[str], caption: str) -> str:
-    """
-    Crea el contenedor padre del carrusel (media_type=CAROUSEL).
-    """
-    resp = requests.post(
-        f"{GRAPH}/{IG_USER_ID}/media",
-        data={
-            "media_type": "CAROUSEL",
-            "children": ",".join(children_ids),
-            "caption": caption or "",
-            "access_token": IG_TOKEN,
-        },
-        timeout=180,
-    )
-    if resp.status_code != 200:
-        st.error(f"IG ERROR parent: {resp.status_code} {resp.text}")
-        resp.raise_for_status()
-    return resp.json()["id"]
-
-def ig_publish(creation_id: str) -> dict:
-    resp = requests.post(
-        f"{GRAPH}/{IG_USER_ID}/media_publish",
-        data={"creation_id": creation_id, "access_token": IG_TOKEN},
-        timeout=180,
-    )
-    if resp.status_code != 200:
-        st.error(f"IG ERROR publish: {resp.status_code} {resp.text}")
-        resp.raise_for_status()
-    return resp.json()
-
-st.divider()
-st.header("📲 Publicar en Instagram (carruseles)")
-
-# 1) Carpeta base que contiene subcarpetas (cada una es un post)
-default_posts_root = str(Path.cwd() / "outputs")
-posts_root = st.text_input("Carpeta base con posteos (subcarpetas)", value=default_posts_root)
-
-col_chk1, col_chk2 = st.columns([1,1])
-with col_chk1:
-    if st.button("🔍 Escanear carpeta"):
-        st.session_state.posts_root_scanned = posts_root
-
-root = Path(st.session_state.get("posts_root_scanned") or posts_root)
-if not root.exists():
-    st.warning("La carpeta no existe. Ajustá la ruta y presioná 'Escanear carpeta'.")
-else:
-    subfolders = [p for p in root.iterdir() if p.is_dir()]
-    if not subfolders:
-        st.info("No se encontraron subcarpetas dentro de la carpeta base.")
-    else:
-        st.caption(f"Encontradas {len(subfolders)} carpetas de post.")
-
-        for folder in subfolders:
-            st.subheader(f"📦 {folder.name}")
-            videos = sorted(folder.glob("*.mp4"))
-            txts   = sorted(folder.glob("*.txt"))
-
-            if not videos:
-                st.warning("No hay .mp4 en esta carpeta; se omite el post.")
-                continue
-
-            # Leer caption desde el .txt (si existe)
-            caption_text = ""
-            if txts:
-                try:
-                    caption_text = txts[0].read_text()
-                except Exception:
-                    caption_text = ""
-            with st.expander("📄 Texto del release (.txt)", expanded=False):
-                st.text(caption_text if caption_text else "(sin .txt)")
-
-            # Previews de videos
-            cols = st.columns(min(len(videos), 3))
-            for i, v in enumerate(videos):
-                with cols[i % len(cols)]:
-                    st.video(str(v))
-                    st.caption(v.name)
-
-            # Publicar carrusel
-            if st.button(f"🚀 Publicar carrusel: {folder.name}", key=f"pub_{folder.name}"):
-                # Validaciones mínimas
-                if not IG_USER_ID or not IG_TOKEN:
-                    st.error("Faltan IG_USER_ID / IG_ACCESS_TOKEN en el entorno (.env).")
-                elif not GCS_JSON or not Path(GCS_JSON).exists() or not GCS_BUCKET:
-                    st.error("Falta configurar GCS (GCS_CREDENTIALS_JSON / GCS_BUCKET).")
-                else:
-                    log_lines = []
-                    progress  = st.progress(0, text="Subiendo y creando children…")
-                    children  = []
-
-                    try:
-                        # 1) Subir y crear children
-                        for i, mp4 in enumerate(videos, start=1):
-                            progress.progress(i/len(videos), text=f"Child {i}/{len(videos)}")
-                            signed = gcs_upload_signed(mp4, key_prefix=f"{GCS_PREFIX}/{folder.name}", expires_seconds=7200)
-                            # child de carrusel (video)
-                            child_id = ig_create_carousel_child(signed)
-                            # esperar a que IG procese el video
-                            status = ig_wait_finished(child_id, timeout_sec=300)
-                            log_lines.append(f"Child OK [{status}]: {mp4.name} → {child_id}")
-                            children.append(child_id)
-
-                        # 2) Crear padre
-                        progress.progress(1.0, text="Creando carrusel padre…")
-                        parent_id = ig_create_carousel_parent(children, caption=caption_text)
-                        log_lines.append(f"Padre creado → {parent_id}")
-
-                        # 2.5) Esperar a que el PADRE esté listo (igual que con los children)
-                        st.write("⏳ Esperando carrusel padre listo…")
-                        status_parent = ig_wait_finished(parent_id, timeout_sec=420)
-                        log_lines.append(f"Padre OK [{status_parent}] → {parent_id}")
-
-                        # 3) Publicar
-                        pub = ig_publish(parent_id)
-                        st.success(f"✅ Publicado: {pub}")
-                    except Exception as e:
-                        st.error(f"Error publicando: {e}")
-                    finally:
-                        if log_lines:
-                            st.text_area("Log", "\n".join(log_lines), height=200)
