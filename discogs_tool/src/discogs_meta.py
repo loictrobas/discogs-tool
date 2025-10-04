@@ -1,29 +1,33 @@
 import os
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from urllib.parse import urlparse
+
+import requests
 import discogs_client
 from dotenv import load_dotenv
 
 load_dotenv()
 
-DISCOGS_USER_TOKEN = os.getenv("DISCOGS_USER_TOKEN")
-APP_USER_AGENT = os.getenv("APP_USER_AGENT", "DiscogsTool/1.0")
+# === ENV ===
+DISCOGS_USER_TOKEN = os.getenv("DISCOGS_USER_TOKEN", "").strip()
+DISCOGS_USER_AGENT = os.getenv("DISCOGS_USER_AGENT", "DiscogsTool/1.0").strip()
+DISCOGS_CURRENCY   = (os.getenv("DISCOGS_CURRENCY") or "ARS").strip().upper()  # <<-- ARS por default
 
 if not DISCOGS_USER_TOKEN:
     raise RuntimeError("Falta DISCOGS_USER_TOKEN en .env")
 
-client = discogs_client.Client(APP_USER_AGENT, user_token=DISCOGS_USER_TOKEN)
+# Cliente oficial para metadata
+client = discogs_client.Client(DISCOGS_USER_AGENT, user_token=DISCOGS_USER_TOKEN)
 
-
+# === Dataclasses ===
 @dataclass
 class TrackInfo:
     position: str
     title: str
     duration: Optional[str] = None
     artists: Optional[List[str]] = None  # artistas del track (si existen)
-
 
 @dataclass
 class ReleaseInfo:
@@ -40,7 +44,7 @@ class ReleaseInfo:
     price_median: Optional[float] = None
     price_max: Optional[float] = None
 
-
+# === Helpers ===
 def _extract_release_or_master_id(url: str):
     parsed = urlparse(url)
     parts = [p for p in parsed.path.split("/") if p]
@@ -55,7 +59,6 @@ def _extract_release_or_master_id(url: str):
         if match:
             return kind, int(match.group(1))
     raise ValueError("URL de Discogs no reconocida. Debe apuntar a /release/... o /master/...")
-
 
 def _images_to_urls(images):
     out = []
@@ -77,7 +80,98 @@ def _images_to_urls(images):
         pass
     return out
 
+def _discogs_headers():
+    h = {"User-Agent": DISCOGS_USER_AGENT}
+    if DISCOGS_USER_TOKEN:
+        h["Authorization"] = f"Discogs token={DISCOGS_USER_TOKEN}"
+    return h
 
+def _to_float(x):
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    if isinstance(x, str):
+        try:
+            return float(x.replace(",", "."))
+        except Exception:
+            return None
+    if isinstance(x, dict):
+        # típicamente {'currency': 'ARS', 'value': 123.45}
+        for k in ("value", "amount", "price"):
+            if k in x:
+                return _to_float(x[k])
+    return None
+
+def _median(nums: List[float]) -> Optional[float]:
+    nums = sorted(n for n in nums if n is not None)
+    if not nums:
+        return None
+    n = len(nums)
+    mid = n // 2
+    if n % 2 == 1:
+        return nums[mid]
+    return (nums[mid - 1] + nums[mid]) / 2.0
+
+def fetch_market_stats(release_id: int, currency: str) -> Tuple[Optional[float], Optional[float], Optional[float], str]:
+    """
+    Intenta traer low/median/high desde el endpoint de stats.
+    (No siempre expone mediana y máximo; varios objetos traen solo 'lowest_price').
+    """
+    curr = (currency or DISCOGS_CURRENCY or "ARS").upper()
+    url = f"https://api.discogs.com/marketplace/stats/{release_id}?curr_abbr={curr}"
+    try:
+        r = requests.get(url, headers=_discogs_headers(), timeout=30)
+        r.raise_for_status()
+        data = r.json() or {}
+    except Exception:
+        return (None, None, None, curr)
+
+    p_min = _to_float(data.get("lowest_price"))
+    # tolerante a variaciones: usamos varias alternativas si existieran
+    p_med = (
+        _to_float(data.get("median_price")) or
+        _to_float(data.get("median")) or
+        _to_float(data.get("summary", {}).get("median")) or
+        _to_float(data.get("sales", {}).get("median"))
+    )
+    p_max = (
+        _to_float(data.get("highest_price")) or
+        _to_float(data.get("highest")) or
+        _to_float(data.get("summary", {}).get("highest")) or
+        _to_float(data.get("sales", {}).get("highest"))
+    )
+    return (p_min, p_med, p_max, curr)
+
+def fetch_price_suggestions_approx(release_id: int, currency: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Fallback: calcula min/mediana/max aproximados a partir de price_suggestions
+    (por condición). No es idéntico al historial de ventas de Discogs,
+    pero sirve cuando el endpoint de stats no trae median/high.
+    """
+    curr = (currency or DISCOGS_CURRENCY or "ARS").upper()
+    url = f"https://api.discogs.com/marketplace/price_suggestions/{release_id}?curr_abbr={curr}"
+    try:
+        r = requests.get(url, headers=_discogs_headers(), timeout=30)
+        r.raise_for_status()
+        data = r.json() or {}
+    except Exception:
+        return (None, None, None)
+
+    values = []
+    for cond, obj in (data.items() if isinstance(data, dict) else []):
+        values.append(_to_float(obj.get("value")))
+
+    values = [v for v in values if v is not None]
+    if not values:
+        return (None, None, None)
+
+    pmin = min(values)
+    pmax = max(values)
+    pmed = _median(values)
+    return (pmin, pmed, pmax)
+
+# === MAIN ===
 def fetch_release_info(url: str) -> ReleaseInfo:
     kind, _id = _extract_release_or_master_id(url)
 
@@ -118,11 +212,9 @@ def fetch_release_info(url: str) -> ReleaseInfo:
                 if getattr(t, "artists", None):
                     track_artists = []
                     for ta in t.artists:
-                        # t.artists puede tener .name
                         nm = getattr(ta, "name", None) or (ta.get("name") if isinstance(ta, dict) else None)
                         if nm:
                             track_artists.append(str(nm))
-                # si no hay, lo dejamos como None y luego la UI podrá usar artistas del release
             except Exception:
                 track_artists = None
 
@@ -140,21 +232,23 @@ def fetch_release_info(url: str) -> ReleaseInfo:
     # imágenes
     image_urls = _images_to_urls(getattr(release, "images", []))
 
-    # precios
-    avg_price = None
-    currency = None
-    price_min = None
-    price_median = None
-    price_max = None
-    try:
-        data = getattr(release, "data", {}) or {}
-        avg_price = data.get("lowest_price", None)
-        currency = data.get("curr_abbr", None) or data.get("lowest_price_currency", None)
-        price_min = data.get("lowest_price", None)
-        price_median = data.get("median_price", None)
-        price_max = data.get("highest_price", None)
-    except Exception:
-        pass
+    # === PRECIOS ===
+    # 1) Intento oficial con stats
+    pmin, pmed, pmax, curr = fetch_market_stats(release.id, DISCOGS_CURRENCY)
+
+    # 2) Fallback con price_suggestions si faltan mediana/máximo
+    if pmed is None or pmax is None:
+        s_min, s_med, s_max = fetch_price_suggestions_approx(release.id, DISCOGS_CURRENCY)
+        # completamos solo lo que falta
+        if pmin is None:
+            pmin = s_min
+        if pmed is None:
+            pmed = s_med
+        if pmax is None:
+            pmax = s_max
+
+    # Lo que llamábamos community_avg_price lo alineamos a "mediana" (más útil)
+    community_avg_price = pmed
 
     return ReleaseInfo(
         title=str(getattr(release, "title", "") or "").strip(),
@@ -164,9 +258,9 @@ def fetch_release_info(url: str) -> ReleaseInfo:
         labels=labels,
         tracks=tracks,
         images=image_urls,
-        community_avg_price=avg_price,
-        marketplace_currency=currency,
-        price_min=price_min,
-        price_median=price_median,
-        price_max=price_max,
+        community_avg_price=community_avg_price,
+        marketplace_currency=curr,
+        price_min=pmin,
+        price_median=pmed,
+        price_max=pmax,
     )
