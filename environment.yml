@@ -1,0 +1,15 @@
+name: discogs-tool
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - ffmpeg
+  - pip
+  - pip:
+      - discogs-client
+      - requests
+      - python-dotenv
+      - Pillow
+      - moviepy
+      - yt-dlp
+      - pydub

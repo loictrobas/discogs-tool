@@ -1,0 +1,38 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+__pycache__/
+.ipynb_checkpoints/
+
+# Entornos
+.venv/
+.env
+.env.*.local
+
+# Credenciales y llaves (ajusta el patrón a tus nombres reales)
+*.pem
+*.key
+*.p12
+*.crt
+*credentials*.json
+*service*.json
+discoschetos-*.json
+
+# Artefactos de la app
+outputs/**
+discogs_tool/outputs/**
+
+# Datos crudos opcionales
+data/**
+discogs_tool/data/**
+
+# Archivos binarios de salida
+*.mp3
+*.mp4
+*.mov
+*.wav
+*.flac
+
+# Conda lock files opcionales
+.conda/
