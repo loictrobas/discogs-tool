@@ -34,6 +34,20 @@ def load_config() -> dict:
             return {}
     return {}
 
+def _reset_track_widgets_state():
+    """Borra de session_state los widgets por-track para evitar ‘ghost values’ entre releases."""
+    kill_prefixes = (
+        "choice_",
+        "manual_url_no_results_",
+        "manual_url_with_results_",
+        "local_file_",
+    )
+    to_delete = []
+    for k in list(st.session_state.keys()):
+        if isinstance(k, str) and any(k.startswith(p) for p in kill_prefixes):
+            to_delete.append(k)
+    for k in to_delete:
+        del st.session_state[k]
 
 def save_config(cfg: dict):
     try:
@@ -146,28 +160,116 @@ def yt_download_audio_by_url(video_url: str, dst_no_ext: Path, start_sec=DEFAULT
     # Recorte
     try:
         audio = AudioSegment.from_file(mp3_path)
-        start_ms = start_sec * 1000
-        end_ms = start_ms + (duration_sec * 1000)
-        if len(audio) > start_ms:
+        total_ms = len(audio)
+        total_sec = total_ms / 1000.0
+
+        # regla: si el track es corto (< 2:30), arrancar en la mitad
+        eff_start_sec = start_sec
+        if total_sec < 150:
+            eff_start_sec = max(0, int((total_sec - duration_sec) / 2))
+
+        start_ms = int(eff_start_sec * 1000)
+        end_ms = start_ms + int(duration_sec * 1000)
+
+        if total_ms > start_ms:
             clip = audio[start_ms:end_ms]
-            clip.export(mp3_path, format="mp3")
         else:
-            audio[:duration_sec*1000].export(mp3_path, format="mp3")
+            clip = audio[: int(duration_sec * 1000)]
+
+        clip.export(mp3_path, format="mp3")
         return mp3_path
     except Exception:
         return None
 
+def trim_local_mp3(src_mp3: Path, dst_no_ext: Path,
+                   start_sec: int = DEFAULT_START,
+                   duration_sec: int = DEFAULT_DURATION) -> Optional[Path]:
+    """
+    Toma un MP3 local, recorta desde start_sec por duration_sec y
+    exporta a {dst_no_ext}.mp3. Devuelve la ruta final o None si falla.
+    """
+    try:
+        # salida (misma convención que yt_download_audio_by_url)
+        out_mp3 = dst_no_ext.with_suffix(".mp3")
+
+        audio = AudioSegment.from_file(str(src_mp3))
+        total_ms = len(audio)
+        total_sec = total_ms / 1000.0
+
+        # regla: si el track es corto (< 2:30), arrancar en la mitad
+        eff_start_sec = start_sec
+        if total_sec < 150:  # 2m30s
+            eff_start_sec = max(0, int((total_sec - duration_sec) / 2))
+
+        start_ms = int(eff_start_sec * 1000)
+        end_ms = start_ms + int(duration_sec * 1000)
+
+        # si el archivo es más corto que el start, usar desde el principio
+        if total_ms <= start_ms:
+            clip = audio[: int(duration_sec * 1000)]
+        else:
+            clip = audio[start_ms:end_ms]
+
+        clip.export(out_mp3, format="mp3")
+        return out_mp3
+    except Exception:
+        return None
 
 def make_video(image_path: Path, audio_path: Path, out_mp4: Path, duration_sec=DEFAULT_DURATION):
-    # moviepy import dentro de la función para evitar conflictos de cargado
+    """
+    Genera el video usando la imagen fija + audio. 
+    Escala y centra la imagen en 1080x1080 sin deformar (fit + pad).
+    Si el audio dura menos que duration_sec, se ajusta a la duración segura.
+    """
     import moviepy.editor as mp
-    img_clip = mp.ImageClip(str(image_path)).set_duration(duration_sec)
-    aud_clip = mp.AudioFileClip(str(audio_path)).subclip(0, duration_sec)
-    video = img_clip.set_audio(aud_clip)
-    video.write_videofile(str(out_mp4), fps=24, codec="libx264", audio_codec="aac", verbose=False, logger=None)
-    img_clip.close()
-    aud_clip.close()
 
+    img_clip = mp.ImageClip(str(image_path))
+    aud_clip = mp.AudioFileClip(str(audio_path))
+
+    # margen para no leer justo en el borde del archivo
+    epsilon = 0.10
+    audio_dur = aud_clip.duration or 0
+    safe_audio_dur = max(0.0, audio_dur - epsilon)
+    effective_dur = duration_sec if safe_audio_dur <= 0 else min(duration_sec, safe_audio_dur)
+    if effective_dur <= 0:
+        effective_dur = audio_dur if audio_dur and audio_dur > 0 else 5.0
+
+    # preparar imagen (fit + pad en 1080x1080)
+    img_clip = (
+        img_clip
+        .resize(
+            height=1080 if img_clip.w < img_clip.h else None,
+            width=1080 if img_clip.w >= img_clip.h else None
+        )
+        .on_color(size=(1080, 1080), color=(0, 0, 0), pos="center")
+        .set_duration(effective_dur)
+    )
+
+    aud_clip = aud_clip.subclip(0, effective_dur)
+
+    # armar video final con audio
+    video = img_clip.set_audio(aud_clip)
+
+    try:
+        video.write_videofile(
+            str(out_mp4),
+            fps=24,
+            codec="libx264",
+            audio_codec="aac",
+            preset="medium",
+            threads=2,
+            ffmpeg_params=["-pix_fmt", "yuv420p"],
+            verbose=False,
+            logger=None,
+        )
+    finally:
+        # cerrar siempre
+        try: video.close()
+        except: pass
+        try: img_clip.close()
+        except: pass
+        try: aud_clip.close()
+        except: pass
 
 # ---------- Estado de la app ----------
 if "output_dir" not in st.session_state:
@@ -183,7 +285,7 @@ if "search_results" not in st.session_state:
     st.session_state.search_results = {}
 
 if "chosen_results" not in st.session_state:
-    # dict por track_id -> ("manual", url) | ("auto", result_dict)
+    # dict por track_id -> ("manual", url) | ("auto", result_dict) | ("local", path)
     st.session_state.chosen_results = {}
 
 if "cover_path" not in st.session_state:
@@ -236,6 +338,9 @@ if go_fetch:
         try:
             info = fetch_release_info(discogs_url.strip())
             st.session_state.release_info = info
+
+            # 👇 limpiar widgets del release anterior
+            _reset_track_widgets_state()
 
             # Carpeta por release dentro del output_dir elegido
             release_folder = Path(st.session_state.output_dir) / sanitize_filename(info.title)
@@ -348,13 +453,26 @@ if st.session_state.release_info:
             results = st.session_state.search_results.get(idx, [])
             if not results:
                 st.warning("Sin resultados automáticos.")
-                # 👉 input manual cuando NO hay resultados (key única)
+                # 👉 input manual cuando NO hay resultados
                 manual_url = st.text_input(
                     f"🔗 Pegá un link manual de YouTube para {t.title}",
-                    key=f"manual_url_no_results_{idx}"
+                    key=f"manual_url_no_results_{sanitize_filename(info.title)}_{idx}"
                 )
                 if manual_url:
                     st.session_state.chosen_results[idx] = ("manual", manual_url)
+
+                # 👉 alternativa: cargar MP3 local
+                local_file = st.file_uploader(
+                    f"📂 O subí un MP3 local para {t.title}",
+                    type=["mp3"],
+                    key=f"local_file_{sanitize_filename(info.title)}_{idx}"
+                )
+                if local_file:
+                    local_path = (Path(st.session_state.output_dir) / sanitize_filename(info.title) /
+                                 sanitize_filename(f"{t.position + ' ' if t.position else ''}{t.title}.mp3"))
+                    with open(local_path, "wb") as f:
+                        f.write(local_file.read())
+                    st.session_state.chosen_results[idx] = ("local", str(local_path))
                 continue
 
             # Mostrar los resultados con thumbnail + título + canal + duración
@@ -368,16 +486,14 @@ if st.session_state.release_info:
                 label = f"{r['title']}  •  {r['channel']}  •  {dur_txt}"
                 options_labels.append(label)
 
-            # Radio de selección (default 0; no usamos chosen_results como índice)
             choice = st.radio(
                 "Elegí el video correcto:",
                 list(range(len(results))),
                 format_func=lambda i: options_labels[i],
                 index=0,
-                key=f"choice_{idx}",
+                key=f"choice_{sanitize_filename(info.title)}_{idx}",
             )
 
-            # Guardar la selección como "auto"
             st.session_state.chosen_results[idx] = ("auto", results[choice])
 
             colA, colB = st.columns([1,1])
@@ -395,13 +511,26 @@ if st.session_state.release_info:
                 st.write(f"**Duración:** {dur_txt}")
                 st.write(f"**URL:** {results[choice]['url']}")
 
-            # 👉 input manual cuando SÍ hay resultados (key distinta)
+            # 👉 input manual cuando SÍ hay resultados
             manual_url = st.text_input(
                 f"🔗 O pegá un link manual de YouTube para {t.title}",
-                key=f"manual_url_with_results_{idx}"
+                key=f"manual_url_with_results_{sanitize_filename(info.title)}_{idx}"
             )
             if manual_url:
                 st.session_state.chosen_results[idx] = ("manual", manual_url)
+
+            # 👉 alternativa: cargar MP3 local aunque haya resultados
+            local_file = st.file_uploader(
+                f"📂 O subí un MP3 local para {t.title}",
+                type=["mp3"],
+                key=f"local_file_results_{sanitize_filename(info.title)}_{idx}"
+            )
+            if local_file:
+                local_path = (Path(st.session_state.output_dir) / sanitize_filename(info.title) /
+                             sanitize_filename(f"{t.position + ' ' if t.position else ''}{t.title}.mp3"))
+                with open(local_path, "wb") as f:
+                    f.write(local_file.read())
+                st.session_state.chosen_results[idx] = ("local", str(local_path))
 
     st.divider()
 
@@ -429,7 +558,6 @@ if st.session_state.release_info:
                     progress.progress(done / total_tracks, text=f"{done}/{total_tracks}")
                     continue
 
-                # Leer selección (manual o auto)
                 selection = st.session_state.chosen_results.get(idx, None)
                 if not selection:
                     logs.append(f"SKIP (sin selección): {t.title}")
@@ -437,36 +565,66 @@ if st.session_state.release_info:
                     progress.progress(done / total_tracks, text=f"{done}/{total_tracks}")
                     continue
 
-                if selection[0] == "manual":
-                    url = selection[1]  # link manual
-                else:
-                    chosen = selection[1]
-                    url = chosen["url"]
+                mp3_path: Optional[Path] = None
 
                 base_name = sanitize_filename(f"{t.position + ' ' if t.position else ''}{t.title}")
-                audio_dst = release_folder / base_name
+                audio_dst_no_ext = release_folder / base_name  # mismo naming que usás para los .mp4
 
-                # Descargar audio recortado
-                mp3_path = yt_download_audio_by_url(url, audio_dst, start_sec=DEFAULT_START, duration_sec=DEFAULT_DURATION)
-                if not mp3_path:
+                if selection[0] == "local":
+                    # selection[1] es la ruta al MP3 original elegido por vos (no lo tocamos)
+                    local_mp3 = Path(selection[1])
+                    mp3_path = trim_local_mp3(
+                        local_mp3,
+                        audio_dst_no_ext,
+                        start_sec=DEFAULT_START,
+                        duration_sec=DEFAULT_DURATION,
+                    )
+
+                elif selection[0] == "manual":
+                    url = selection[1]
+                    mp3_path = yt_download_audio_by_url(
+                        url,
+                        audio_dst_no_ext,
+                        start_sec=DEFAULT_START,
+                        duration_sec=DEFAULT_DURATION,
+                    )
+
+                else:  # "auto"
+                    chosen = selection[1]
+                    url = chosen["url"]
+                    mp3_path = yt_download_audio_by_url(
+                        url,
+                        audio_dst_no_ext,
+                        start_sec=DEFAULT_START,
+                        duration_sec=DEFAULT_DURATION,
+                    )
+
+                if not mp3_path or not mp3_path.exists():
                     logs.append(f"ERROR audio: {t.title}")
                     done += 1
                     progress.progress(done / total_tracks, text=f"{done}/{total_tracks}")
                     continue
 
-                # Componer video
+                base_name = sanitize_filename(f"{t.position + ' ' if t.position else ''}{t.title}")
                 price_str = f"{price}{(' ' + currency) if currency else ''}" if price != "NA" else "NA"
                 out_video = release_folder / f"{base_name} - {price_str}.mp4"
                 try:
+                    # 1) crear video
                     make_video(cover_path, mp3_path, out_video, duration_sec=DEFAULT_DURATION)
-                    # borrar mp3 temporal
-                    try:
-                        mp3_path.unlink()
-                    except Exception:
-                        pass
                     logs.append(f"OK: {out_video.name}")
                 except Exception as e:
                     logs.append(f"ERROR video {t.title}: {e}")
+                finally:
+                    # 2) BORRAR SIEMPRE el MP3 (sea local o descargado)
+                    try:
+                        # aseguro tipo Path y que no quede abierto
+                        mp3_p = Path(mp3_path)
+                        if mp3_p.exists():
+                            mp3_p.unlink()
+                            logs.append(f"🗑️ borrado MP3: {mp3_p.name}")
+                    except Exception as del_err:
+                        # no frenamos el proceso por esto
+                        logs.append(f"⚠️ no pude borrar {Path(mp3_path).name}: {del_err}")
 
                 done += 1
                 progress.progress(done / total_tracks, text=f"{done}/{total_tracks}")
