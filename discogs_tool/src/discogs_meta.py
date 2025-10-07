@@ -1,5 +1,6 @@
+# discogs_tool/src/discogs_meta.py
 import os
-import re
+import re as _re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from urllib.parse import urlparse
@@ -13,7 +14,7 @@ load_dotenv()
 # === ENV ===
 DISCOGS_USER_TOKEN = os.getenv("DISCOGS_USER_TOKEN", "").strip()
 DISCOGS_USER_AGENT = os.getenv("DISCOGS_USER_AGENT", "DiscogsTool/1.0").strip()
-DISCOGS_CURRENCY   = (os.getenv("DISCOGS_CURRENCY") or "ARS").strip().upper()  # <<-- ARS por default
+DISCOGS_CURRENCY   = (os.getenv("DISCOGS_CURRENCY") or "ARS").strip().upper()  # default ARS
 
 if not DISCOGS_USER_TOKEN:
     raise RuntimeError("Falta DISCOGS_USER_TOKEN en .env")
@@ -55,7 +56,7 @@ def _extract_release_or_master_id(url: str):
 
     if len(parts) >= 2 and parts[0] in ("release", "master"):
         kind = parts[0]
-        match = re.match(r"(\d+)", parts[1])
+        match = _re.match(r"(\d+)", parts[1])  # <-- usar _re
         if match:
             return kind, int(match.group(1))
     raise ValueError("URL de Discogs no reconocida. Debe apuntar a /release/... o /master/...")
@@ -203,10 +204,30 @@ def fetch_release_info(url: str) -> ReleaseInfo:
     except Exception:
         pass
 
-    # tracks con artistas por track (si existen)
+    # ---------- Tracklist: filtrar encabezados ("That Side", "This Side", etc.) ----------
+    _HEADINGS = {
+        "that side", "this side", "logo side", "info side",
+        "other side", "both sides", "this-side", "that-side",
+        "side a", "side b"  # por si algún release lo cargó así
+    }
+    def _norm(s: str) -> str:
+        return _re.sub(r"\s+", " ", (s or "").strip().lower())
+
     tracks: List[TrackInfo] = []
     try:
-        for t in release.tracklist or []:
+        for t in (getattr(release, "tracklist", None) or []):
+            # 1) Si Discogs marca el item como encabezado, lo salteamos
+            t_type = getattr(t, "type_", None)
+            if t_type and str(t_type).lower() != "track":
+                continue
+
+            # 2) Filtro de resguardo: títulos típicos de encabezado + sin duración
+            title_raw = str(getattr(t, "title", "") or "").strip()
+            dur_raw = str(getattr(t, "duration", "") or "") or None
+            if (not dur_raw) and (_norm(title_raw) in _HEADINGS):
+                continue
+
+            # 3) Artistas específicos del track (si existen)
             track_artists: Optional[List[str]] = None
             try:
                 if getattr(t, "artists", None):
@@ -221,8 +242,8 @@ def fetch_release_info(url: str) -> ReleaseInfo:
             tracks.append(
                 TrackInfo(
                     position=str(getattr(t, "position", "") or ""),
-                    title=str(getattr(t, "title", "") or "").strip(),
-                    duration=str(getattr(t, "duration", "") or "") or None,
+                    title=title_raw,
+                    duration=dur_raw,
                     artists=track_artists,
                 )
             )

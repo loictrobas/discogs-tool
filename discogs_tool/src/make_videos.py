@@ -86,12 +86,52 @@ def yt_search_and_download_mp3(query: str, dst_no_ext: Path, start_sec=90, durat
         return None
 
 def make_video(image_path: Path, audio_path: Path, out_mp4: Path, duration_sec=30):
-    img_clip = mp.ImageClip(str(image_path)).set_duration(duration_sec)
-    aud_clip = mp.AudioFileClip(str(audio_path)).subclip(0, duration_sec)
-    video = img_clip.set_audio(aud_clip)
-    video.write_videofile(str(out_mp4), fps=24, codec="libx264", audio_codec="aac", verbose=False, logger=None)
+    """
+    Genera el video usando la imagen fija + audio. Si el audio dura menos que
+    duration_sec, recorta a la duración disponible para evitar errores.
+    """
+    import moviepy.editor as mp
+
+    # Cargar recursos
+    img_clip = mp.ImageClip(str(image_path))
+    aud_clip = mp.AudioFileClip(str(audio_path))
+
+    # Calcular duración segura
+    # (restamos un pequeño epsilon para evitar lecturas en el borde)
+    epsilon = 0.10
+    safe_audio_dur = max(0, (aud_clip.duration or 0) - epsilon)
+    effective_dur = duration_sec if safe_audio_dur <= 0 else min(duration_sec, safe_audio_dur)
+    if effective_dur <= 0:
+        # fallback: usa toda la duración del audio (si vino 0 por metadatos raros)
+        effective_dur = aud_clip.duration or 5.0
+
+    # Armar clips
+    img_clip = img_clip.set_duration(effective_dur)
+    aud_clip = aud_clip.subclip(0, effective_dur)
+
+    # Para IG: 1080x1080 con pad, yuv420p
+    video = (
+        img_clip
+        .set_audio(aud_clip)
+        .resize(height=1080)  # escalado proporcional
+        .on_color(size=(1080, 1080), color=(0, 0, 0), pos='center')  # pad a 1080x1080
+    )
+
+    # Exportar
+    video.write_videofile(
+        str(out_mp4),
+        fps=24,
+        codec="libx264",
+        audio_codec="aac",
+        preset="medium",
+        threads=2,
+        ffmpeg_params=["-pix_fmt", "yuv420p"]
+    )
+
+    # Cerrar (evita archivos bloqueados)
     img_clip.close()
     aud_clip.close()
+    video.close()
 
 # ------------------------------ Pipeline ------------------------------ #
 def process_release(url: str, start_sec=90, duration_sec=30):
