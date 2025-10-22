@@ -13,6 +13,19 @@ from pydub.utils import which
 from discogs_tool.src.discogs_meta import fetch_release_info
 from discogs_tool.src.make_txt import sanitize_filename, make_release_txt
 
+from PIL import Image
+
+# --- Compatibilidad Pillow >=10 ---
+# Algunos módulos (como moviepy) todavía esperan Image.ANTIALIAS
+if not hasattr(Image, "Resampling"):
+    # Pillow <10: no hace falta parchear
+    Image.Resampling = Image
+else:
+    # Pillow >=10: asegurar compatibilidad retroactiva
+    Image.ANTIALIAS = Image.Resampling.LANCZOS
+    Image.BICUBIC = Image.Resampling.BICUBIC
+    Image.BILINEAR = Image.Resampling.BILINEAR
+
 # ---------- Configuración base ----------
 APP_USER_AGENT = os.getenv("APP_USER_AGENT", "DiscogsTool/1.0")
 FFMPEG_PATH = which("ffmpeg")

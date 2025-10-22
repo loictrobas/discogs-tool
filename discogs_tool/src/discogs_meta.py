@@ -14,7 +14,8 @@ load_dotenv()
 # === ENV ===
 DISCOGS_USER_TOKEN = os.getenv("DISCOGS_USER_TOKEN", "").strip()
 DISCOGS_USER_AGENT = os.getenv("DISCOGS_USER_AGENT", "DiscogsTool/1.0").strip()
-DISCOGS_CURRENCY   = (os.getenv("DISCOGS_CURRENCY") or "ARS").strip().upper()  # default ARS
+DISCOGS_CURRENCY   = "USD"
+#(os.getenv("DISCOGS_CURRENCY") or "ARS").strip().upper()  # default ARS
 
 if not DISCOGS_USER_TOKEN:
     raise RuntimeError("Falta DISCOGS_USER_TOKEN en .env")
@@ -82,7 +83,10 @@ def _images_to_urls(images):
     return out
 
 def _discogs_headers():
-    h = {"User-Agent": DISCOGS_USER_AGENT}
+    h = {
+        "User-Agent": DISCOGS_USER_AGENT,
+        "Accept": "application/vnd.discogs.v2+json"
+    }
     if DISCOGS_USER_TOKEN:
         h["Authorization"] = f"Discogs token={DISCOGS_USER_TOKEN}"
     return h

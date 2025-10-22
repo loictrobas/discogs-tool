@@ -72,27 +72,44 @@ def ig_create_reel_container(video_url: str, caption: str = "", thumb_offset_sec
         resp.raise_for_status()
     return resp.json()["id"]
 
-def ig_wait_finished(creation_id: str, timeout_sec: int = 240) -> str:
-    """
-    Hace polling hasta que status_code sea FINISHED o PUBLISHED.
-    """
+def ig_wait_finished(creation_id: str, timeout_sec: int = 300, show_log: bool = True) -> str:
+    """Espera a que el media container esté listo y muestra el estado en tiempo real."""
     t0 = time.time()
-    last = None
+    last_status = None
+    attempt = 0
+
     while time.time() - t0 < timeout_sec:
-        r = requests.get(
-            f"{GRAPH}/{creation_id}",
-            params={"fields": "status_code", "access_token": IG_TOKEN},
-            timeout=30,
-        )
-        r.raise_for_status()
-        status = r.json().get("status_code")
-        if status != last:
-            print("IG status:", status)
-            last = status
+        attempt += 1
+        try:
+            r = requests.get(
+                f"{GRAPH}/{creation_id}",
+                params={"fields": "status_code", "access_token": IG_TOKEN},
+                timeout=30,
+            )
+            r.raise_for_status()
+            status = r.json().get("status_code", "UNKNOWN")
+        except Exception as e:
+            status = f"⚠️ error {e}"
+        
+        # Mostrar estado en tiempo real (solo si cambia)
+        if status != last_status:
+            if show_log:
+                st.write(f"🕒 [{attempt}] Estado actual: {status}")
+            last_status = status
+
+        # Si está listo
         if status in ("FINISHED", "PUBLISHED"):
+            st.success(f"✅ Contenedor {creation_id} listo ({status})")
             return status
-        time.sleep(3)
-    raise TimeoutError("Tiempo de espera agotado esperando FINISHED")
+
+        # Si algo falló de entrada
+        if status in ("ERROR", "EXPIRED"):
+            st.error(f"❌ Error al procesar {creation_id}: {status}")
+            raise RuntimeError(f"Container {creation_id} terminó con estado {status}")
+
+        time.sleep(5)
+
+    raise TimeoutError(f"Timeout esperando FINISHED para {creation_id} (último estado: {last_status})")
 
 def ig_publish(creation_id: str) -> dict:
     r = requests.post(

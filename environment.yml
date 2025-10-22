@@ -6,10 +6,34 @@ dependencies:
   - ffmpeg
   - pip
   - pip:
+      # --- Core ---
       - discogs-client
       - requests
       - python-dotenv
-      - Pillow
-      - moviepy
+      - Pillow==11.1.0
+      - pandas
+      - numpy
+
+      # --- Audio/Video ---
+      - moviepy==1.0.3
       - yt-dlp
       - pydub
+
+      # --- App UI ---
+      - streamlit==1.50.0
+      - altair
+      - gitpython
+
+      # --- Google Sheets & Cloud Storage ---
+      - gspread
+      - google-auth
+      - google-auth-oauthlib
+      - google-api-core
+      - google-cloud-storage
+      - google-cloud-core
+
+      # --- Utilidades / Logs ---
+      - tqdm
+      - tenacity
+      - protobuf
+      - typing_extensions
