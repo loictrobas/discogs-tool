@@ -143,24 +143,46 @@ def yt_search(query: str, n: int = 5) -> List[Dict]:
         return []
 
 
-def yt_download_audio_by_url(video_url: str, dst_no_ext: Path, start_sec=DEFAULT_START, duration_sec=DEFAULT_DURATION) -> Optional[Path]:
+def yt_download_audio_by_url(video_url: str, dst_no_ext: Path, start_sec=90, duration_sec=30) -> Optional[Path]:
     """
     Descarga audio (mp3) de una URL de YouTube específica y recorta desde start_sec.
+    Usa headers modernos + cookies si existen + fallback automático.
     """
+    import subprocess, shutil
+
     out_template = str(dst_no_ext.with_suffix(".%(ext)s"))
-    cmd = [
+    cookies_path = Path("cookies.txt")
+
+    base_cmd = [
         "yt-dlp",
-        video_url,
+        "--add-header", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0_0) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/130.0.0.0 Safari/537.36",
+        "--add-header", "Accept-Language: en-US,en;q=0.9",
         "-x", "--audio-format", "mp3",
         "-o", out_template,
-        "--no-playlist",
-        "--no-warnings",
-        "--quiet",
+        "--no-playlist", "--no-warnings", "--quiet",
+        "--geo-bypass",  # evita bloqueos regionales
+        "--extractor-args", "youtube:player_client=android"  # fuerza cliente estable
     ]
+
+    # 1️⃣ Primer intento: con cookies si existen
+    cmd = base_cmd.copy()
+    if cookies_path.exists():
+        cmd += ["--cookies", str(cookies_path)]
+    cmd.append(video_url)
+
     try:
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError:
-        return None
+        # 2️⃣ Fallback sin cookies
+        cmd = base_cmd.copy()
+        cmd.append(video_url)
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"⚠️ Error ejecutando yt-dlp (ambos intentos fallaron): {e}")
+            return None
 
     mp3_path = dst_no_ext.with_suffix(".mp3")
     if not mp3_path.exists():
@@ -170,28 +192,21 @@ def yt_download_audio_by_url(video_url: str, dst_no_ext: Path, start_sec=DEFAULT
         else:
             return None
 
-    # Recorte
+    # Recorte de audio
     try:
+        from pydub import AudioSegment
         audio = AudioSegment.from_file(mp3_path)
         total_ms = len(audio)
-        total_sec = total_ms / 1000.0
-
-        # regla: si el track es corto (< 2:30), arrancar en la mitad
-        eff_start_sec = start_sec
-        if total_sec < 150:
-            eff_start_sec = max(0, int((total_sec - duration_sec) / 2))
-
-        start_ms = int(eff_start_sec * 1000)
-        end_ms = start_ms + int(duration_sec * 1000)
-
+        start_ms = start_sec * 1000
+        end_ms = start_ms + (duration_sec * 1000)
         if total_ms > start_ms:
             clip = audio[start_ms:end_ms]
         else:
-            clip = audio[: int(duration_sec * 1000)]
-
+            clip = audio[:duration_sec * 1000]
         clip.export(mp3_path, format="mp3")
         return mp3_path
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ Error recortando audio: {e}")
         return None
 
 def trim_local_mp3(src_mp3: Path, dst_no_ext: Path,
