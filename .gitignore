@@ -37,3 +37,4 @@ discogs_tool/data/**
 # Conda lock files opcionales
 .conda/
 cookies.txt
+cookies.txt
