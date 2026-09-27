@@ -1,6 +1,6 @@
 import os, requests, sys
 
-TOKEN = os.environ.get("FB_TOKEN") or "EAA656tQYBIABPjdSGEbS5GKd2TBmAleCJuIc6z7QP9U9AeZCF9tC2F6JA2cIEotyG327pIp6jZCtCCy6qZAM3YZCfBpORiJWB2EnfvMUtwWAostmIJulcGd3SFxHk2RbVRuLDF7NGmZBqbrTVC2vNiYboxzuwZBZAN2U6A9erSfe46Y5We5vcR0ycLqpPIQgvTItcnJZCJA2j8mVP6kXoCxETA7GcGOotw5j4ybuLc9NPPQZD"
+TOKEN = os.environ["FB_TOKEN"]
 
 # 1) Páginas
 r = requests.get(

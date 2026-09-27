@@ -1,41 +1,58 @@
-# OS / editor
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
 .DS_Store
-Thumbs.db
-.vscode/
-__pycache__/
-.ipynb_checkpoints/
-
-# Entornos
-.venv/
-.env
-.env.*.local
-
-# Credenciales y llaves (ajusta el patrón a tus nombres reales)
 *.pem
-*.key
-*.p12
-*.crt
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# credentials (never commit)
 *credentials*.json
 *service*.json
 discoschetos-*.json
+cookies.txt
+supabase/.temp/
+supabase/.branches/
 
-# Artefactos de la app
-outputs/**
-discogs_tool/outputs/**
-
-# Datos crudos opcionales
-data/**
-discogs_tool/data/**
-
-# Archivos binarios de salida
+# legacy python app outputs
+__pycache__/
+outputs/
+legacy/outputs/
 *.mp3
 *.mp4
 *.mov
 *.wav
-*.flac
-
-# Conda lock files opcionales
-.conda/
-cookies.txt
-cookies.txt
-cookies.txt
