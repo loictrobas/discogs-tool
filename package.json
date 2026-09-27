@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "worker": "tsx --env-file=.env.local scripts/audio-worker.ts",
-    "typecheck": "next typegen && tsc --noEmit"
+    "typecheck": "next typegen && tsc --noEmit",
+    "create-user": "tsx --env-file=.env.local scripts/create-user.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",
